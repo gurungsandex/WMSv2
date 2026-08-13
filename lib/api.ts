@@ -246,3 +246,108 @@ export const alerts = {
       body: JSON.stringify({ ids }),
     }),
 };
+
+// ---------- endpoint activity ----------
+
+export interface ProcessRow {
+  pid:           number;
+  name:          string;
+  username?:     string;
+  exe?:          string;
+  cpu_pct:       number;
+  mem_pct:       number;
+  mem_rss_mb:    number;
+  io_read_mbs:   number;
+  io_write_mbs:  number;
+  started_at?:   string;
+  updated_at:    string;
+}
+
+export interface PortRow {
+  proto:         string;
+  laddr:         string;
+  lport:         number;
+  pid?:          number;
+  process_name?: string;
+  updated_at:    string;
+}
+
+export interface EventRow {
+  time:            string;
+  kind:            string;
+  severity:        "info" | "warning" | "critical";
+  subject?:        string;
+  detail?:         Record<string, unknown>;
+  workstation_id?: string;
+  hostname?:       string;
+}
+
+export const activity = {
+  processes: (id: string, limit = 25) =>
+    req<ProcessRow[]>(`/activity/${id}/processes?limit=${limit}`),
+  ports: (id: string) => req<PortRow[]>(`/activity/${id}/ports`),
+  events: (id: string, limit = 50) =>
+    req<EventRow[]>(`/activity/${id}/events?limit=${limit}`),
+  fleetEvents: (params?: Record<string, string>) => {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return req<EventRow[]>(`/activity/events${qs}`);
+  },
+};
+
+// ---------- collector policy ----------
+
+export interface CollectorSetting {
+  enabled:      boolean;
+  interval_sec: number;
+}
+
+export interface PolicyRow {
+  workstation_id: string | null;
+  collector:      string;
+  enabled:        boolean;
+  interval_sec:   number;
+  updated_at:     string;
+  hostname:       string | null;
+}
+
+export interface PolicyResponse {
+  collectors:   string[];
+  rows:         PolicyRow[];
+  capableHosts: Record<string, number>;
+}
+
+export const policy = {
+  list: () => req<PolicyResponse>("/policy/collectors"),
+  forHost: (id: string) =>
+    req<{ effective: Record<string, CollectorSetting>; capabilities: string[] }>(
+      `/policy/collectors/${id}`
+    ),
+  set: (data: {
+    collector: string;
+    enabled: boolean;
+    interval_sec?: number;
+    workstation_id?: string | null;
+  }) =>
+    req<{ ok: boolean }>("/policy/collectors", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  clearOverride: (workstationId: string, collector: string) =>
+    req<{ ok: boolean }>(`/policy/collectors/${workstationId}/${collector}`, {
+      method: "DELETE",
+    }),
+};
+
+// ---------- export ----------
+
+/** Build a download URL for a dataset export (CSV or JSON). */
+export function exportUrl(
+  dataset: "events" | "processes" | "ports" | "alerts",
+  format: "csv" | "json" = "csv",
+  workstationId?: string
+): string {
+  const base = process.env.NEXT_PUBLIC_API_URL ?? "/api";
+  const qs = new URLSearchParams({ format });
+  if (workstationId) qs.set("workstation_id", workstationId);
+  return `${base}/export/${dataset}?${qs.toString()}`;
+}

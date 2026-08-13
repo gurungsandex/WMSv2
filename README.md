@@ -29,10 +29,13 @@ Workstation Monitoring System (WMS) is an open-source IT monitoring tool that gi
 - **Real-time metrics** — CPU, RAM, disk, GPU, and network streamed live via WebSocket
 - **Health scoring** — composite health score per workstation with drill-down factors
 - **Alert engine** — configurable thresholds with auto-resolve and bulk acknowledge
+- **Endpoint activity** — opt-in process inventory and listening-port visibility per host
+- **Activity timeline** — new processes, ports opening/closing, and agent version drift
 - **Network discovery** — CIDR scan to discover hosts; one-click agent enrollment
 - **SSH push-deploy** — install the agent on a remote host directly from the admin UI
 - **Role-based access** — admin (full) and viewer (read-only) roles
 - **Audit log** — every admin action recorded
+- **CSV / JSON export** — pull events, processes, ports, and alerts for investigation
 - **Cross-platform agent** — Linux (systemd), macOS (launchd), Windows (PowerShell service)
 - **Self-hosted & private** — your data never leaves your infrastructure
 
@@ -55,7 +58,9 @@ Workstation Monitoring System (WMS) is an open-source IT monitoring tool that gi
                          │ SQL (pg driver)
 ┌────────────────────────▼────────────────────────────────┐
 │            TimescaleDB / PostgreSQL 15                  │
-│   workstations, metrics, alerts, audit_log, users       │
+│   workstations, metrics, alerts, audit_log, users,      │
+│   endpoint_events, host_processes, host_ports,          │
+│   collector_policy                                      │
 └─────────────────────────────────────────────────────────┘
                          ▲
        WebSocket /ws/agent│ (per enrolled workstation)
@@ -215,6 +220,68 @@ Alerts auto-resolve when the condition clears. Acknowledge alerts in bulk on the
 
 ---
 
+## Endpoint Activity
+
+Beyond resource metrics, the agent can report what is actually running on a workstation. Every collector is **off by default** and must be switched on by an admin under **Settings → Collectors**.
+
+### Available collectors
+
+| Collector | What it reports | Measured agent cost |
+|---|---|---|
+| **Process inventory** | Top processes by CPU, memory and I/O; an event when a new process appears | ~0.15 ms per process per sample (~15 ms on a 100-process host) |
+| **Listening ports** | Listening TCP/UDP sockets attributed to the owning process; events when a port opens or closes | ~3 ms per sample; scales with open file descriptors |
+
+At the default 60-second interval both collectors together stay well under 0.1% of one CPU core. Agent memory footprint is roughly 14 MB resident with both enabled.
+
+### How it works
+
+1. On connect, the agent sends a `hello` frame advertising which collectors its build supports.
+2. The server replies with the collector policy that applies to that host — the fleet default, or a per-host override.
+3. The agent runs only the collectors that are both **advertised** and **enabled**, on the interval the server specifies.
+4. Changing a setting pushes the new policy to connected agents immediately; no restart or redeploy.
+
+Collector state is per-workstation, so you can enable process inventory fleet-wide and switch it off for a single sensitive host, or the reverse.
+
+### Where to see it
+
+- **Workstations → (any host) → Endpoint activity** — top processes, listening ports, and a recent-activity feed, all updating live over the existing WebSocket.
+- **Settings → Collectors** — enable/disable, set intervals, review per-host overrides, and download exports.
+
+### Event types
+
+| Kind | Severity | Meaning |
+|---|---|---|
+| `process_start` | info | A process appeared that was not in the previous sample |
+| `port_opened` | warning | A new listening socket appeared |
+| `port_closed` | info | A listening socket went away |
+| `agent_version_changed` | warning | The agent reported a different version than last seen |
+| `agent_reconnected` | info | The agent re-established its WebSocket |
+
+Events are retained for 30 days (`EVENT_RETENTION_DAYS`). On TimescaleDB this is enforced by a retention policy; on vanilla PostgreSQL a pruning job runs every six hours.
+
+### What this deliberately does not collect
+
+This is a monitoring tool, not a surveillance tool. It does **not** capture keystrokes, screenshots, clipboard contents, browser history, webcam or microphone input, or the contents of any file.
+
+Process **command-line arguments are deliberately excluded** — `argv` routinely contains passwords, tokens and document paths, which is user content. The agent records process name, executable path, owner and PID, which is enough to identify what is running.
+
+### Data export
+
+Download CSV or JSON from **Settings → Collectors → Export data**, or directly:
+
+```
+GET /api/export/events?format=csv
+GET /api/export/processes?format=json&workstation_id=<uuid>
+GET /api/export/ports?format=csv
+GET /api/export/alerts?format=csv
+```
+
+### Older agents
+
+Agents built before this feature send no `hello`, so the server records no capabilities for them and never requests a collector. They keep streaming metrics exactly as before — no upgrade required, nothing breaks.
+
+---
+
 ## Network Discovery
 
 Go to **Network → Run Scan** and enter a CIDR range (e.g. `192.168.1.0/24`). WMS performs a fast concurrent port scan and lists discovered hosts with IP, hostname, MAC address, and open ports. Click **Enroll** on any host to generate an install command.
@@ -269,18 +336,19 @@ Binaries are output to `server/binaries/`.
 ```
 .
 ├── agent/                  # Go agent (cross-platform)
-│   ├── collector/          # gopsutil metric collection
+│   ├── collector/          # gopsutil metrics + process/port collectors
 │   ├── config/             # config + credential persistence
-│   ├── transport/          # WebSocket client + enrollment
+│   ├── transport/          # WebSocket client, enrollment, policy handling
 │   ├── install/            # OS-specific install scripts
 │   └── build-all.sh        # cross-compile script
 ├── app/                    # Next.js App Router pages
-│   ├── workstations/       # Fleet list + detail views
+│   ├── workstations/       # Fleet list + detail views (incl. endpoint activity)
 │   ├── alerts/             # Alert center
 │   ├── network/            # Discovery + enrollment
-│   ├── settings/           # Users, password, audit log
+│   ├── settings/           # Users, collectors, password, audit log
 │   └── login/              # Auth page
 ├── components/             # Reusable React components
+│   ├── activity/           # Process, port, and activity-feed panels
 │   ├── charts/             # Animated charts (Gauge, Sparkline, LineChart…)
 │   ├── dashboard/          # Dashboard cards
 │   ├── network/            # Enroll modal
@@ -290,7 +358,8 @@ Binaries are output to `server/binaries/`.
 ├── server/                 # Fastify API server
 │   ├── src/
 │   │   ├── routes/         # REST endpoints
-│   │   ├── services/       # Alert engine, discovery, health scoring
+│   │   ├── services/       # Alert engine, discovery, health scoring,
+│   │   │                   #   collector policy, activity ingest, audit
 │   │   ├── ws/             # WebSocket hub + handlers
 │   │   └── auth/           # JWT middleware
 │   └── scripts/migrate.js  # Migration runner
@@ -309,9 +378,10 @@ Binaries are output to `server/binaries/`.
 - All cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` in production
 - Agent JWTs are separate from user JWTs with a different signing secret
 - Caddy provisions Let's Encrypt certificates automatically for real domains
-- All admin actions are written to the audit log (Settings → Audit Log)
+- All admin actions are written to the audit log (Settings → Audit Log), including enabling or disabling any collector
 - The database is isolated inside the Docker network (not exposed externally)
 - Enrollment tokens are one-time-use and exchange for a long-lived agent credential on first contact
+- Endpoint collectors are off by default, admin-only to change, and never capture user content (see [Endpoint Activity](#endpoint-activity))
 
 ---
 
