@@ -94,9 +94,10 @@ export async function enrollmentRoutes(app: FastifyInstance) {
        secretHash, agent_version, ws.id]
     );
 
-    // Issue a long-lived agent JWT (signed by the same instance the WS handler verifies with)
+    // Issue a long-lived agent JWT, signed with the dedicated agent secret so
+    // it can never be presented as a user token.
     const payload: AgentJwtPayload = { sub: ws.id, type: "agent" };
-    const agentJwt = app.jwt.sign(payload);
+    const agentJwt = app.jwt.agent.sign(payload);
 
     return {
       workstation_id: ws.id,

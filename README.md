@@ -167,28 +167,38 @@ curl -s -X POST https://<domain>/api/enroll/token \
 
 The response includes ready-to-run one-liner install commands for all platforms.
 
-### Linux (systemd)
+### Linux (systemd) and macOS (launchd)
+
+The simplest path embeds the token in the URL — this is exactly the command the
+API returns and the admin UI shows:
 
 ```bash
-WMS_SERVER=wss://<domain>/ws/agent \
-WMS_TOKEN=<token> \
-bash <(curl -fsSL https://<domain>/install/linux.sh)
+curl -fsSL https://<domain>/q/<token> | sudo bash
 ```
 
-### macOS (launchd)
+The script detects the OS and architecture, downloads the matching binary, and
+registers a systemd unit or launchd daemon.
+
+If you would rather not put the token in a URL, use the token-less variant and
+supply it through the environment (`-E` preserves it through `sudo`):
 
 ```bash
-WMS_SERVER=wss://<domain>/ws/agent \
-WMS_TOKEN=<token> \
-bash <(curl -fsSL https://<domain>/install/macos.sh)
+export WMS_ENROLL_TOKEN=<token>
+curl -fsSL https://<domain>/install/linux | sudo -E bash
+# or /install/macos — the script body is identical and auto-detects the OS
 ```
 
 ### Windows (PowerShell, run as Administrator)
 
 ```powershell
-.\agent\install\windows\install.ps1 `
-  -WmsServerUrl "wss://<domain>/ws/agent" `
-  -WmsEnrollToken "<token>"
+iex (irm https://<domain>/q/<token>/windows)
+```
+
+Or the token-less variant:
+
+```powershell
+$env:WMS_ENROLL_TOKEN = "<token>"
+iex (irm https://<domain>/install/windows)
 ```
 
 The agent will:
@@ -329,6 +339,30 @@ cd agent
 
 Binaries are output to `server/binaries/`.
 
+For Docker deployments this is not needed — `server/Dockerfile` cross-compiles the
+agent binaries during the image build, so `/download/*` works out of the box.
+
+### Run the tests
+
+CI runs these on every push and pull request (`.github/workflows/ci.yml`).
+
+```bash
+# Web + agent
+npm run typecheck && npm run lint && npm run build
+cd agent && go build ./... && go vet ./...
+
+# Server smoke test — point it at a running server backed by a throwaway database
+cd server
+DATABASE_URL=postgresql://wms:wms@localhost:5432/wms npm run migrate
+DATABASE_URL=postgresql://wms:wms@localhost:5432/wms npm run dev &
+API_URL=http://127.0.0.1:4000 JWT_SECRET=<same as the server> npm run test:smoke
+```
+
+The smoke test covers the auth boundary (including that agent credentials cannot
+read fleet data), the agent protocol and its backwards compatibility, the
+collectors, and the agent bootstrap endpoints. Passing `JWT_SECRET` enables the
+legacy-token regression checks; without it those are skipped.
+
 ---
 
 ## Project Structure
@@ -376,7 +410,11 @@ Binaries are output to `server/binaries/`.
 ## Security
 
 - All cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` in production
-- Agent JWTs are separate from user JWTs with a different signing secret
+- Agent JWTs are signed with `AGENT_JWT_SECRET`, separate from `JWT_SECRET`, and are
+  rejected outright on every user-facing route — a stolen agent credential can submit
+  that host's telemetry and nothing else
+- In production the server refuses to start if either secret is missing, shorter than
+  32 characters, still the built-in placeholder, or if the two match
 - Caddy provisions Let's Encrypt certificates automatically for real domains
 - All admin actions are written to the audit log (Settings → Audit Log), including enabling or disabling any collector
 - The database is isolated inside the Docker network (not exposed externally)

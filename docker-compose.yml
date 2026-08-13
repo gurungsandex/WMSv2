@@ -19,8 +19,9 @@ services:
 
   server:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      # Repo root, so the image can also compile the agent binaries it serves.
+      context: .
+      dockerfile: server/Dockerfile
     restart: unless-stopped
     depends_on:
       db:
@@ -35,6 +36,10 @@ services:
       SCAN_CONCURRENCY: ${SCAN_CONCURRENCY:-20}
       SCAN_TIMEOUT_MS: ${SCAN_TIMEOUT_MS:-1000}
       ALERT_INTERVAL_MS: ${ALERT_INTERVAL_MS:-60000}
+      EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-30}
+      # Set to "false" once every agent has re-enrolled after the agent-token
+      # signing change, to stop honouring old user-secret-signed credentials.
+      ALLOW_LEGACY_AGENT_TOKENS: ${ALLOW_LEGACY_AGENT_TOKENS:-true}
       MIGRATIONS_DIR: /app/migrations
     volumes:
       - ./db/migrations:/app/migrations:ro

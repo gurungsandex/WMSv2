@@ -104,19 +104,19 @@ The response includes ready-to-run install commands for Linux, macOS, and Window
 
 ### Install the agent
 
-**Linux (systemd):**
+**Linux (systemd) and macOS (launchd):**
 ```bash
 # Copy the install command from the UI — it looks like:
-WMS_SERVER=wss://<domain>/ws/agent \
-WMS_TOKEN=<token> \
-bash <(curl -fsSL https://<domain>/install/linux.sh)
+curl -fsSL https://<domain>/q/<token> | sudo bash
 ```
 
-**macOS (launchd):**
+The same script serves both platforms and auto-detects the OS and architecture.
+To keep the token out of the URL, pass it through the environment instead
+(`-E` preserves it through `sudo`):
+
 ```bash
-WMS_SERVER=wss://<domain>/ws/agent \
-WMS_TOKEN=<token> \
-bash agent/install/macos/install.sh
+export WMS_ENROLL_TOKEN=<token>
+curl -fsSL https://<domain>/install/linux | sudo -E bash
 ```
 
 **Windows (PowerShell as Administrator):**
