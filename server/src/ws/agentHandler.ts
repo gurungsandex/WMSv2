@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { ingestMetric } from "../routes/metrics";
 import type { MetricPayload } from "../routes/metrics";
 import { query } from "../db";
+import { verifyAgentToken } from "../auth/agentToken";
 import { registerAgent } from "./hub";
 import { pushPolicy, COLLECTORS } from "../services/policy";
 import {
@@ -29,19 +30,20 @@ export async function agentWsRoutes(app: FastifyInstance) {
         return;
       }
 
-      let agentPayload: { sub: string; type: string };
-      try {
-        agentPayload = app.jwt.verify(token) as { sub: string; type: string };
-      } catch {
+      const verified = verifyAgentToken(app, token);
+      if (!verified) {
         socket.close(4001, "Invalid token");
         return;
       }
-      if (agentPayload.type !== "agent") {
-        socket.close(4003, "Not an agent token");
-        return;
-      }
 
-      const workstationId = agentPayload.sub;
+      const workstationId = verified.workstationId;
+      if (verified.legacy) {
+        app.log.warn(
+          { workstationId },
+          "Agent authenticated with a legacy token signed by the user secret — " +
+            "re-enroll this host, then set ALLOW_LEGACY_AGENT_TOKENS=false"
+        );
+      }
       app.log.info({ workstationId }, "Agent connected");
       registerAgent(workstationId, socket);
 

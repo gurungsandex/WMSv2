@@ -1,0 +1,12 @@
+# Build context is the repo root for both images — keep it small.
+**/node_modules
+**/.next
+**/dist
+.git
+.github
+server/binaries/*
+!server/binaries/.gitignore
+*.log
+.env
+.env.*
+!.env.example

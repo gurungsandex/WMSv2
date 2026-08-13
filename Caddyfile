@@ -11,6 +11,19 @@
     }
   }
 
+  # Agent bootstrap endpoints — served by the API, not the Next.js app.
+  # Without these the documented install one-liners fall through to the web
+  # container and 404.
+  handle /q/* {
+    reverse_proxy server:4000
+  }
+  handle /install/* {
+    reverse_proxy server:4000
+  }
+  handle /download/* {
+    reverse_proxy server:4000
+  }
+
   # Serve Next.js web app
   handle {
     reverse_proxy web:3000

@@ -4,6 +4,7 @@ import { broadcast } from "../ws/hub";
 import { evaluateAlerts } from "../services/alertEngine";
 import { computeHealthScore } from "../services/healthScore";
 import { requireAuth } from "../auth/middleware";
+import { verifyAgentToken } from "../auth/agentToken";
 
 export interface MetricPayload {
   workstation_id: string;
@@ -38,19 +39,10 @@ export async function metricsRoutes(app: FastifyInstance) {
       const authHeader = req.headers.authorization;
       if (!authHeader?.startsWith("Bearer ")) return reply.code(401).send({ error: "Unauthorized" });
 
-      const token = authHeader.slice(7);
-      let payload: { sub: string; type: string };
-      try {
-        payload = app.jwt.verify(token) as { sub: string; type: string };
-        // Note: agent routes use the same JWT instance for simplicity in MVP
-        // In production, use a separate secret via plugin aliasing
-      } catch {
-        return reply.code(401).send({ error: "Invalid token" });
-      }
+      const verified = verifyAgentToken(app, authHeader.slice(7));
+      if (!verified) return reply.code(401).send({ error: "Invalid agent token" });
 
-      if (payload.type !== "agent") return reply.code(403).send({ error: "Not an agent token" });
-
-      await ingestMetric(payload.sub, req.body);
+      await ingestMetric(verified.workstationId, req.body);
       return { ok: true };
     }
   );

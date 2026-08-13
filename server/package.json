@@ -7,7 +7,8 @@
     "build": "tsc",
     "start": "node dist/main.js",
     "migrate": "node --env-file=.env scripts/migrate.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:smoke": "node test/smoke.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^9.3.1",
@@ -31,6 +32,7 @@
     "@types/ping": "^0.4.4",
     "@types/ssh2": "^1.15.5",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "ws": "^8.21.3"
   }
 }
