@@ -6,6 +6,7 @@ import { Gauge } from "@/components/charts/Gauge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { LineChart } from "@/components/charts/LineChart";
 import { AnimatedNumber } from "@/components/charts/AnimatedNumber";
+import { ActivityPanels } from "@/components/activity/ActivityPanels";
 import { workstations as wsApi, type EnrolledWorkstation } from "@/lib/api";
 import { useLive } from "@/lib/LiveContext";
 
@@ -267,6 +268,13 @@ export default function WorkstationDetailPage({ params }: { params: { id: string
             </div>
           </div>
         </div>
+
+        {/* Endpoint activity */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+          <span className="label">Endpoint activity</span>
+          <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+        </div>
+        <ActivityPanels workstationId={id} />
 
       </div>
     </Shell>

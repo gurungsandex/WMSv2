@@ -14,9 +14,13 @@ import { workstationRoutes } from "./routes/workstations";
 import { alertRoutes } from "./routes/alerts";
 import { discoveryRoutes } from "./routes/discovery";
 import { deployRoutes } from "./routes/deploy";
+import { activityRoutes } from "./routes/activity";
+import { policyRoutes } from "./routes/policy";
+import { exportRoutes } from "./routes/export";
 import { agentWsRoutes } from "./ws/agentHandler";
 import { browserWsRoutes } from "./ws/browserHandler";
 import { raiseHeartbeatAlert } from "./services/alertEngine";
+import { pruneEndpointEvents } from "./services/activity";
 import { query } from "./db";
 
 const app = Fastify({ logger: { level: "info" } });
@@ -50,6 +54,9 @@ async function main() {
   await app.register(alertRoutes);
   await app.register(discoveryRoutes);
   await app.register(deployRoutes);
+  await app.register(activityRoutes);
+  await app.register(policyRoutes);
+  await app.register(exportRoutes);
 
   // WebSocket routes
   await app.register(agentWsRoutes);
@@ -215,6 +222,9 @@ fi
   // Start heartbeat watchdog
   startHeartbeatWatchdog();
 
+  // Start endpoint-event retention job
+  startEventPruner();
+
   await app.listen({ port: config.port, host: "0.0.0.0" });
   app.log.info(`Server listening on port ${config.port}`);
 }
@@ -235,6 +245,25 @@ function startHeartbeatWatchdog() {
       app.log.error({ err }, "Heartbeat watchdog error");
     }
   }, config.alerts.intervalMs);
+}
+
+// Trim endpoint_events beyond the retention window.
+//
+// TimescaleDB applies its own retention policy from migration 004; this job is
+// what keeps vanilla PostgreSQL bounded. Running both is harmless.
+function startEventPruner() {
+  const run = async () => {
+    try {
+      const removed = await pruneEndpointEvents(config.events.retentionDays);
+      if (removed > 0) {
+        app.log.info({ removed }, "Pruned endpoint events past retention");
+      }
+    } catch (err) {
+      app.log.error({ err }, "Endpoint event pruner error");
+    }
+  };
+  run();
+  setInterval(run, 6 * 60 * 60 * 1000); // every 6 hours
 }
 
 main().catch((err) => {

@@ -14,7 +14,10 @@ const WS_URL =
 export type WsEvent =
   | { type: "metric"; workstation_id: string; data: Record<string, number>; status: string; score: number; factors: unknown[] }
   | { type: "alert_open"; alert_id: string; workstation_id: string; metric: string; severity: string }
-  | { type: "alert_resolved"; alert_id: string; workstation_id: string };
+  | { type: "alert_resolved"; alert_id: string; workstation_id: string }
+  | { type: "endpoint_event"; workstation_id: string; kind: string; severity: string; subject?: string }
+  | { type: "processes_updated"; workstation_id: string; total: number }
+  | { type: "ports_updated"; workstation_id: string; count: number };
 
 interface Options {
   onEvent: (e: WsEvent) => void;

@@ -31,4 +31,9 @@ export const config = {
     // Evaluation interval in ms
     intervalMs: parseInt(process.env.ALERT_INTERVAL_MS ?? "15000"),
   },
+
+  events: {
+    // How long endpoint activity events are kept before being pruned.
+    retentionDays: parseInt(process.env.EVENT_RETENTION_DAYS ?? "30"),
+  },
 };

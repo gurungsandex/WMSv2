@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Shell } from "@/components/shell/Shell";
 import { useAuth } from "@/lib/AuthContext";
-import { auth, type UserRow, type AuditRow } from "@/lib/api";
+import { auth, policy, exportUrl, type UserRow, type AuditRow, type PolicyResponse } from "@/lib/api";
 
 function relTime(iso?: string | null) {
   if (!iso) return "—";
@@ -13,40 +13,247 @@ function relTime(iso?: string | null) {
   return `${Math.floor(ms / 86_400_000)}d ago`;
 }
 
-type Tab = "users" | "audit" | "password";
+type Tab = "users" | "collectors" | "audit" | "password";
+
+const TAB_LABEL: Record<Tab, string> = {
+  users:      "Users",
+  collectors: "Collectors",
+  audit:      "Audit Log",
+  password:   "Change Password",
+};
 
 export default function SettingsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [tab, setTab] = useState<Tab>(isAdmin ? "users" : "password");
 
+  const tabs: Tab[] = isAdmin
+    ? ["users", "collectors", "audit", "password"]
+    : ["collectors", "password"];
+
   return (
-    <Shell title="Settings" subtitle="User management, audit log, and account">
+    <Shell title="Settings" subtitle="User management, collectors, audit log, and account">
       <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
 
         {/* Tab bar */}
         <div style={{ display: "flex", gap: 6, borderBottom: "1px solid var(--border)", paddingBottom: 0 }}>
-          {(isAdmin ? ["users", "audit", "password"] : ["password"]).map((t) => (
-            <button key={t} onClick={() => setTab(t as Tab)}
+          {tabs.map((t) => (
+            <button key={t} onClick={() => setTab(t)}
               style={{
                 padding: "8px 18px", borderRadius: "6px 6px 0 0", border: "1px solid",
                 borderBottom: "none",
                 borderColor: tab === t ? "var(--border)" : "transparent",
                 background: tab === t ? "var(--card)" : "transparent",
                 color: tab === t ? "var(--text)" : "var(--text-dim)",
-                fontSize: 13, cursor: "pointer", textTransform: "capitalize",
+                fontSize: 13, cursor: "pointer",
                 marginBottom: -1,
               }}>
-              {t === "users" ? "Users" : t === "audit" ? "Audit Log" : "Change Password"}
+              {TAB_LABEL[t]}
             </button>
           ))}
         </div>
 
-        {tab === "users"    && <UsersPanel />}
-        {tab === "audit"    && <AuditPanel />}
-        {tab === "password" && <PasswordPanel />}
+        {tab === "users"      && <UsersPanel />}
+        {tab === "collectors" && <CollectorsPanel isAdmin={isAdmin} />}
+        {tab === "audit"      && <AuditPanel />}
+        {tab === "password"   && <PasswordPanel />}
       </div>
     </Shell>
+  );
+}
+
+// ── Collectors panel ──────────────────────────────────────────────────────────
+
+const COLLECTOR_META: Record<string, { label: string; blurb: string; cost: string }> = {
+  process: {
+    label: "Process inventory",
+    blurb: "Top processes by CPU, memory and I/O, plus an event when a new process appears. Records process name, executable path, owner and PID — never command-line arguments.",
+    cost:  "measured ~0.15 ms per process per sample (~15 ms on a 100-process host); a few KB per sample.",
+  },
+  ports: {
+    label: "Listening ports",
+    blurb: "Listening TCP/UDP sockets attributed to the owning process, plus an event when a port opens or closes.",
+    cost:  "measured ~3 ms per sample on a lightly loaded host; scales with open file descriptors.",
+  },
+};
+
+function CollectorsPanel({ isAdmin }: { isAdmin: boolean }) {
+  const [data, setData]       = useState<PolicyResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving]   = useState<string | null>(null);
+  const [err, setErr]         = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setData(await policy.list()); }
+    catch (e: unknown) { setErr(e instanceof Error ? e.message : "Failed to load"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function toggle(collector: string, enabled: boolean, intervalSec: number) {
+    setSaving(collector);
+    setErr("");
+    try {
+      await policy.set({ collector, enabled, interval_sec: intervalSec, workstation_id: null });
+      await load();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const globals = (data?.rows ?? []).filter((r) => r.workstation_id === null);
+  const overrides = (data?.rows ?? []).filter((r) => r.workstation_id !== null);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+      <div style={{
+        padding: "11px 14px", borderRadius: 8, fontSize: 12.5, lineHeight: 1.6,
+        background: "var(--card-2)", border: "1px solid var(--border)", color: "var(--text-dim)",
+      }}>
+        Collectors gather endpoint activity beyond resource metrics. Every collector is
+        <strong style={{ color: "var(--text)" }}> off by default</strong> and only runs on
+        hosts whose agent reports support for it. Turning one on takes effect immediately on
+        connected agents and is recorded in the audit log.
+      </div>
+
+      {err && <div style={{ fontSize: 12, color: "var(--critical)" }}>{err}</div>}
+
+      {loading ? (
+        <div style={{ padding: 24, color: "var(--text-dim)", fontSize: 13 }}>Loading…</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {(data?.collectors ?? []).map((c) => {
+            const row  = globals.find((g) => g.collector === c);
+            const meta = COLLECTOR_META[c] ?? { label: c, blurb: "", cost: "" };
+            const on   = row?.enabled ?? false;
+            const capable = data?.capableHosts?.[c] ?? 0;
+
+            return (
+              <div key={c} className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 5 }}>
+                      <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{meta.label}</span>
+                      <span className="mono" style={{
+                        fontSize: 10, padding: "1px 7px", borderRadius: 4,
+                        background: on ? "rgba(158,227,79,0.10)" : "var(--card-2)",
+                        color: on ? "var(--healthy)" : "var(--text-faint)",
+                      }}>{on ? "ON" : "OFF"}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6 }}>{meta.blurb}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 5 }}>
+                      Agent cost: {meta.cost}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 3 }}>
+                      {capable} enrolled {capable === 1 ? "agent supports" : "agents support"} this collector
+                    </div>
+                  </div>
+
+                  {isAdmin && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 7, alignItems: "flex-end" }}>
+                      <button
+                        onClick={() => toggle(c, !on, row?.interval_sec ?? 60)}
+                        disabled={saving === c}
+                        style={{
+                          padding: "7px 16px", borderRadius: 7, border: "none",
+                          cursor: saving === c ? "not-allowed" : "pointer",
+                          background: on ? "var(--card-2)" : "var(--info)",
+                          color: on ? "var(--text-dim)" : "#04070d",
+                          fontWeight: 700, fontSize: 12.5, whiteSpace: "nowrap",
+                          boxShadow: on ? "inset 0 0 0 1px var(--border)" : "none",
+                        }}>
+                        {saving === c ? "…" : on ? "Disable" : "Enable"}
+                      </button>
+                      <label style={{ fontSize: 11, color: "var(--text-faint)", display: "flex", alignItems: "center", gap: 6 }}>
+                        Every
+                        <select
+                          value={row?.interval_sec ?? 60}
+                          onChange={(e) => toggle(c, on, parseInt(e.target.value))}
+                          disabled={saving === c}
+                          style={{
+                            background: "var(--bg-2)", border: "1px solid var(--border)",
+                            borderRadius: 6, padding: "3px 7px", color: "var(--text)",
+                            fontSize: 11, cursor: "pointer",
+                          }}>
+                          {[30, 60, 120, 300, 900].map((s) => (
+                            <option key={s} value={s}>{s < 60 ? `${s}s` : `${s / 60}m`}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Per-host overrides */}
+      {overrides.length > 0 && (
+        <div className="card" style={{ overflow: "auto" }}>
+          <div className="card-head"><div className="card-title">Per-host overrides</div></div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["Host", "Collector", "State", "Interval", ""].map((h) => (
+                  <th key={h} style={{ padding: "8px 14px", textAlign: "left", color: "var(--text-dim)", fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {overrides.map((o) => (
+                <tr key={`${o.workstation_id}-${o.collector}`} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "9px 14px", color: "var(--text)" }}>{o.hostname ?? "—"}</td>
+                  <td style={{ padding: "9px 14px", color: "var(--text-dim)" }}>{o.collector}</td>
+                  <td style={{ padding: "9px 14px", color: o.enabled ? "var(--healthy)" : "var(--text-faint)" }}>
+                    {o.enabled ? "Enabled" : "Disabled"}
+                  </td>
+                  <td style={{ padding: "9px 14px", fontFamily: "var(--font-mono)", fontSize: 11 }}>{o.interval_sec}s</td>
+                  <td style={{ padding: "9px 14px" }}>
+                    {isAdmin && (
+                      <button
+                        onClick={async () => {
+                          await policy.clearOverride(o.workstation_id!, o.collector);
+                          await load();
+                        }}
+                        style={{ fontSize: 11, color: "var(--info)", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                        Reset to default
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Exports */}
+      <div className="card">
+        <div className="card-head"><div className="card-title">Export data</div></div>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12, lineHeight: 1.6 }}>
+          Download fleet-wide snapshots for investigation or offline analysis.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {(["events", "processes", "ports", "alerts"] as const).map((d) => (
+            <a key={d} href={exportUrl(d, "csv")}
+              style={{
+                padding: "6px 13px", borderRadius: 7, border: "1px solid var(--border)",
+                background: "var(--card-2)", color: "var(--text)", fontSize: 12,
+                textDecoration: "none", textTransform: "capitalize",
+              }}>
+              {d} CSV
+            </a>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -32,11 +33,40 @@ type EnrollResponse struct {
 	AgentToken    string `json:"agent_token"`
 }
 
+// CollectorPolicy is the server's instruction for one optional collector.
+type CollectorPolicy struct {
+	Enabled     bool `json:"enabled"`
+	IntervalSec int  `json:"interval_sec"`
+}
+
+// ServerMessage is a frame sent by the server to the agent. Only "policy" is
+// acted on today; unknown types are ignored so the server can add more without
+// breaking agents already in the field.
+type ServerMessage struct {
+	Type       string                     `json:"type"`
+	Collectors map[string]CollectorPolicy `json:"collectors"`
+}
+
+// Hello is the agent's capability advertisement, sent once per connection.
+// A server that receives no hello must assume the agent supports nothing
+// beyond the original metric stream.
+type Hello struct {
+	Type         string   `json:"type"`
+	AgentVersion string   `json:"agent_version"`
+	Capabilities []string `json:"capabilities"`
+}
+
 type Client struct {
 	serverURL     string
 	agentToken    string
 	workstationID string
 	conn          *websocket.Conn
+	mu            sync.Mutex
+
+	// OnServerMessage is invoked for every decoded server frame.
+	OnServerMessage func(ServerMessage)
+	// hello is re-sent automatically on every (re)connect.
+	hello *Hello
 }
 
 func New(serverURL, agentToken, workstationID string) *Client {
@@ -44,6 +74,15 @@ func New(serverURL, agentToken, workstationID string) *Client {
 		serverURL:     serverURL,
 		agentToken:    agentToken,
 		workstationID: workstationID,
+	}
+}
+
+// SetHello records the capability advertisement to send on each connect.
+func (c *Client) SetHello(agentVersion string, capabilities []string) {
+	c.hello = &Hello{
+		Type:         "hello",
+		AgentVersion: agentVersion,
+		Capabilities: capabilities,
 	}
 }
 
@@ -82,26 +121,49 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 
-	// Read server ack / pings in background
+	// Read server frames in the background and dispatch the ones we understand.
 	go func() {
 		for {
-			_, _, err := conn.ReadMessage()
+			_, raw, err := conn.ReadMessage()
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					log.Printf("ws read: %v", err)
 				}
 				return
 			}
+			var msg ServerMessage
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				continue // not a frame we understand — ignore
+			}
+			if c.OnServerMessage != nil && msg.Type != "" {
+				c.OnServerMessage(msg)
+			}
 		}
 	}()
+
+	// Advertise capabilities so the server knows what it may ask for.
+	if c.hello != nil {
+		if err := c.Send(c.hello); err != nil {
+			log.Printf("hello send failed: %v", err)
+		}
+	}
 
 	return nil
 }
 
 // Send serialises the payload and sends it over the WebSocket.
+//
+// Metric snapshots are sent as a bare object with no "type" field, exactly as
+// before, so a new agent still works against an older server. Everything else
+// carries a "type" discriminator.
 func (c *Client) Send(payload any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.conn == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -113,6 +175,8 @@ func (c *Client) Send(payload any) error {
 }
 
 func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.conn != nil {
 		_ = c.conn.Close()
 	}

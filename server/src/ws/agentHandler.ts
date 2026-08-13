@@ -1,6 +1,19 @@
 import type { FastifyInstance } from "fastify";
 import { ingestMetric } from "../routes/metrics";
 import type { MetricPayload } from "../routes/metrics";
+import { query } from "../db";
+import { registerAgent } from "./hub";
+import { pushPolicy, COLLECTORS } from "../services/policy";
+import {
+  ingestProcesses, ingestPorts, recordEvent,
+  type ProcessPayload, type PortPayload,
+} from "../services/activity";
+
+interface HelloPayload {
+  type:          "hello";
+  agent_version: string;
+  capabilities:  string[];
+}
 
 export async function agentWsRoutes(app: FastifyInstance) {
   // ws://server:4000/ws/agent  — persistent agent connection
@@ -30,12 +43,41 @@ export async function agentWsRoutes(app: FastifyInstance) {
 
       const workstationId = agentPayload.sub;
       app.log.info({ workstationId }, "Agent connected");
+      registerAgent(workstationId, socket);
 
       socket.on("message", async (raw: Buffer) => {
         try {
-          const payload = JSON.parse(raw.toString()) as MetricPayload;
-          payload.workstation_id = workstationId; // enforce from token, not message
-          await ingestMetric(workstationId, payload);
+          const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+
+          // Message routing, backwards compatible by construction:
+          // agents built before this feature send a bare metric snapshot with
+          // no "type" field, so an absent type means "metric", exactly as the
+          // server has always assumed.
+          const kind = typeof msg.type === "string" ? msg.type : "metric";
+
+          switch (kind) {
+            case "metric": {
+              const payload = msg as unknown as MetricPayload;
+              payload.workstation_id = workstationId; // enforce from token, not message
+              await ingestMetric(workstationId, payload);
+              break;
+            }
+
+            case "hello":
+              await handleHello(app, workstationId, msg as unknown as HelloPayload);
+              break;
+
+            case "processes":
+              await ingestProcesses(workstationId, msg as unknown as ProcessPayload);
+              break;
+
+            case "ports":
+              await ingestPorts(workstationId, msg as unknown as PortPayload);
+              break;
+
+            default:
+              app.log.debug({ workstationId, kind }, "Ignoring unknown agent message type");
+          }
         } catch (err) {
           app.log.error({ err }, "Agent WS message error");
         }
@@ -49,4 +91,52 @@ export async function agentWsRoutes(app: FastifyInstance) {
       socket.send(JSON.stringify({ type: "connected", workstation_id: workstationId }));
     }
   );
+}
+
+/**
+ * Record what the agent says it can do, flag version drift, and push the
+ * collector policy that applies to it.
+ */
+async function handleHello(
+  app: FastifyInstance,
+  workstationId: string,
+  hello: HelloPayload
+): Promise<void> {
+  // Only accept capability names this server actually understands.
+  const caps = Array.isArray(hello.capabilities)
+    ? hello.capabilities.filter((c) => (COLLECTORS as readonly string[]).includes(c))
+    : [];
+
+  const [prev] = await query<{ agent_version: string | null }>(
+    "SELECT agent_version FROM workstations WHERE id = $1",
+    [workstationId]
+  );
+
+  await query(
+    `UPDATE workstations SET
+       agent_capabilities  = $2,
+       agent_version       = COALESCE($3, agent_version),
+       agent_last_hello_at = NOW()
+     WHERE id = $1`,
+    [workstationId, JSON.stringify(caps), hello.agent_version ?? null]
+  );
+
+  // Version drift: the agent on this host is not the version we last saw.
+  // Worth surfacing — an unexpected downgrade is a tamper signal.
+  if (prev?.agent_version && hello.agent_version && prev.agent_version !== hello.agent_version) {
+    await recordEvent(
+      workstationId, "agent_version_changed", hello.agent_version,
+      { from: prev.agent_version, to: hello.agent_version },
+      "warning"
+    );
+  }
+
+  await recordEvent(
+    workstationId, "agent_reconnected", hello.agent_version ?? "unknown",
+    { capabilities: caps }
+  );
+
+  app.log.info({ workstationId, caps, version: hello.agent_version }, "Agent hello");
+
+  await pushPolicy(workstationId);
 }

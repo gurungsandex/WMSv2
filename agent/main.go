@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,7 +15,65 @@ import (
 	"github.com/gurungsandex/wms-agent/transport"
 )
 
-const agentVersion = "1.0.0"
+const agentVersion = "1.1.0"
+
+// Optional collectors this build supports. Advertised to the server on
+// connect; the server will not request anything absent from this list.
+var capabilities = []string{"process", "ports"}
+
+// How many processes to report per sample. Keeps the payload small — a full
+// inventory of a busy workstation is mostly idle daemons nobody looks at.
+const topProcessCount = 15
+
+// policyStore holds the collector policy last pushed by the server.
+// Every collector starts disabled and only runs once the server says so.
+type policyStore struct {
+	mu       sync.RWMutex
+	policies map[string]transport.CollectorPolicy
+	lastRun  map[string]time.Time
+}
+
+func newPolicyStore() *policyStore {
+	return &policyStore{
+		policies: map[string]transport.CollectorPolicy{},
+		lastRun:  map[string]time.Time{},
+	}
+}
+
+func (p *policyStore) set(policies map[string]transport.CollectorPolicy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for name, pol := range policies {
+		prev, existed := p.policies[name]
+		p.policies[name] = pol
+		if !existed || prev.Enabled != pol.Enabled {
+			log.Printf("collector %q: enabled=%v interval=%ds", name, pol.Enabled, pol.IntervalSec)
+		}
+	}
+}
+
+// due reports whether a collector is enabled and its interval has elapsed.
+func (p *policyStore) due(name string, now time.Time) bool {
+	p.mu.RLock()
+	pol, ok := p.policies[name]
+	last := p.lastRun[name]
+	p.mu.RUnlock()
+
+	if !ok || !pol.Enabled {
+		return false
+	}
+	interval := time.Duration(pol.IntervalSec) * time.Second
+	if interval < 15*time.Second {
+		interval = 15 * time.Second
+	}
+	return now.Sub(last) >= interval
+}
+
+func (p *policyStore) markRun(name string, now time.Time) {
+	p.mu.Lock()
+	p.lastRun[name] = now
+	p.mu.Unlock()
+}
 
 type state struct {
 	WorkstationID string `json:"workstation_id"`
@@ -107,6 +166,14 @@ func main() {
 	defer cancel()
 
 	client := transport.New(cfg.ServerURL, cfg.AgentToken, cfg.WorkstationID)
+	client.SetHello(agentVersion, capabilities)
+
+	policy := newPolicyStore()
+	client.OnServerMessage = func(msg transport.ServerMessage) {
+		if msg.Type == "policy" && msg.Collectors != nil {
+			policy.set(msg.Collectors)
+		}
+	}
 
 	if err := client.Connect(ctx); err != nil {
 		log.Printf("Initial connect failed: %v — will retry", err)
@@ -117,7 +184,23 @@ func main() {
 	ticker := time.NewTicker(cfg.SendInterval)
 	defer ticker.Stop()
 
+	// Optional collectors are checked on a fixed short tick and each runs on
+	// its own server-configured interval. 15s matches the policy minimum.
+	activityTicker := time.NewTicker(15 * time.Second)
+	defer activityTicker.Stop()
+
 	log.Printf("Agent running — sending metrics every %s", cfg.SendInterval)
+	log.Printf("Optional collectors available: %v (all off until enabled server-side)", capabilities)
+
+	send := func(payload any) {
+		if err := client.Send(payload); err != nil {
+			log.Printf("send error: %v — reconnecting", err)
+			client.Reconnect(ctx)
+			if err2 := client.Send(payload); err2 != nil {
+				log.Printf("send retry failed: %v", err2)
+			}
+		}
+	}
 
 	for {
 		select {
@@ -131,12 +214,32 @@ func main() {
 				log.Printf("collect error: %v", err)
 				continue
 			}
-			if err := client.Send(snap); err != nil {
-				log.Printf("send error: %v — reconnecting", err)
-				client.Reconnect(ctx)
-				// Retry send after reconnect
-				if err2 := client.Send(snap); err2 != nil {
-					log.Printf("send retry failed: %v", err2)
+			send(snap)
+
+		case now := <-activityTicker.C:
+			if policy.due("process", now) {
+				policy.markRun("process", now)
+				procs, newly, total := collector.TopProcesses(topProcessCount)
+				if len(procs) > 0 {
+					send(collector.ProcessPayload{
+						Type:      "processes",
+						Processes: procs,
+						Total:     total,
+						New:       newly,
+					})
+				}
+			}
+
+			if policy.due("ports", now) {
+				policy.markRun("ports", now)
+				ports, opened, closed := collector.ListeningPorts()
+				if len(ports) > 0 || len(closed) > 0 {
+					send(collector.PortPayload{
+						Type:   "ports",
+						Ports:  ports,
+						Opened: opened,
+						Closed: closed,
+					})
 				}
 			}
 		}

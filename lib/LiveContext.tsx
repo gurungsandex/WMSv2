@@ -9,6 +9,8 @@ interface LiveCtx {
   setLive: (v: boolean) => void;
   fleetData: FleetData;
   alertBadge: number; // count of unresolved critical alerts received over WS
+  /** Per-workstation counter bumped whenever endpoint activity arrives. */
+  activityTick: Record<string, number>;
 }
 
 const Ctx = createContext<LiveCtx>({
@@ -16,12 +18,14 @@ const Ctx = createContext<LiveCtx>({
   setLive: () => {},
   fleetData: { fleet: null, rows: [], history: [], loading: true, error: "", lastUpdated: null },
   alertBadge: 0,
+  activityTick: {},
 });
 
 export function LiveProvider({ children }: { children: React.ReactNode }) {
   const [live, setLive] = useState(true);
   const [tickCount, setTickCount] = useState(0);
   const [alertBadge, setAlertBadge] = useState(0);
+  const [activityTick, setActivityTick] = useState<Record<string, number>>({});
   const { data: fleetData, setData } = useFleetData(tickCount);
 
   const handleEvent = useCallback((e: WsEvent) => {
@@ -61,13 +65,23 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
       setAlertBadge((x) => x + 1);
     } else if (e.type === "alert_resolved") {
       setAlertBadge((x) => Math.max(0, x - 1));
+    } else if (
+      e.type === "endpoint_event" ||
+      e.type === "processes_updated" ||
+      e.type === "ports_updated"
+    ) {
+      // Nudge any mounted activity panel for this host to refetch.
+      setActivityTick((prev) => ({
+        ...prev,
+        [e.workstation_id]: (prev[e.workstation_id] ?? 0) + 1,
+      }));
     }
   }, [setData]);
 
   useWebSocket({ onEvent: handleEvent, enabled: live });
 
   return (
-    <Ctx.Provider value={{ live, setLive, fleetData, alertBadge }}>
+    <Ctx.Provider value={{ live, setLive, fleetData, alertBadge, activityTick }}>
       {children}
     </Ctx.Provider>
   );
